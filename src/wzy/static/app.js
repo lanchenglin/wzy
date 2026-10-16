@@ -26,7 +26,8 @@ function action(label, handler, secondary=false) {
 function time(value) { return value ? new Date(value).toLocaleString('zh-CN') : '暂无'; }
 async function refresh() {
   state = await api('/api/state');
-  renderSources(); renderProducts(); renderMatches();
+  renderSources(); renderProducts(); renderMatches(); renderListingPolicy();
+  await refreshOperations();
   const runs = await api('/api/runs');
   $('runs').replaceChildren(...runs.map(r=>el('p', `#${r.id}　${time(r.started)}　${statusNames[r.status]}　实际 ${r.actual_count??'—'} / 声明 ${r.declared_count??'未知'}　${r.errors.join('、')}`)));
   if (!runs.length) $('runs').append(el('p','还没有采集记录。请在上方选择来源开始只读采集。'));
@@ -83,6 +84,53 @@ async function showHistory(p) {
   $('history-content').replaceChildren(...rows.map(r=>el('p',`${time(r.observed_at)}　¥ ${r.price??'未知'}　${statusNames[r.run_status]}　${r.stock}`)));
   $('history-dialog').showModal();
 }
+let listingBusy=false, verifiedItem='', pendingListing=null;
+const listingStates={up:'销售中',down:'已下架'};
+const operationStates={pending:'待执行',dispatched:'已发送，待读回',succeeded:'读回成功',noop:'无需修改',rejected:'已拒绝',uncertain:'结果不确定，需人工核验（禁止盲目重试）'};
+function renderListingPolicy() {
+  const allowed=state.listing_allowed_items;
+  $('listing-policy').textContent=(state.listing_writes_enabled?'真实上下架已启用。':'真实上下架未启用。')+(allowed==null?'允许目标：自有库存中的明确 ID（无额外白名单）。':`允许目标 ID：${allowed.length?allowed.join('、'):'无（空白名单）'}。`);
+  $('listing-submit').disabled=!state.listing_writes_enabled||listingBusy;
+  $('listing-read').disabled=listingBusy;
+}
+async function refreshOperations() {
+  const operations=await api('/api/listings/operations');
+  $('listing-operations').replaceChildren(...operations.map(o=>el('p',`${o.id} · ${o.item_id} · ${listingStates[o.expected]} → ${listingStates[o.desired]} · ${operationStates[o.status]||o.status} · 读回 ${listingStates[o.after_state]||'未知'} · ${time(o.finished_at||o.created_at)} ${o.error||''}`)));
+}
+$('listing-item').addEventListener('input',()=>{verifiedItem='';$('listing-expected').value='';$('listing-confirmed').checked=false;});
+$('listing-desired').addEventListener('change',()=>{$('listing-confirmed').checked=false;});
+$('listing-read').addEventListener('click',async()=>{
+  if(listingBusy)return;
+  const item=$('listing-item').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,128}$/.test(item)){notice('请输入明确的自有商品 ID。',true);return;}
+  listingBusy=true;renderListingPolicy();
+  try {
+    const evidence=await api('/api/listings/items/'+encodeURIComponent(item));
+    if($('listing-item').value.trim()!==item)return;
+    verifiedItem=item;$('listing-expected').value=evidence.state;$('listing-confirmed').checked=false;
+    $('listing-evidence').textContent=`自有商品 ${item}：${listingStates[evidence.state]||'未知'} · ${time(evidence.observed_at)}。独立状态证据，不代表列表或 SKU 完整。`;
+  } catch(e){verifiedItem='';$('listing-expected').value='';notice(e.message,true);}
+  finally{listingBusy=false;renderListingPolicy();}
+});
+$('listing-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  if(listingBusy||!state.listing_writes_enabled)return;
+  const item=$('listing-item').value.trim(), desired=$('listing-desired').value, expected=$('listing-expected').value;
+  if(item!==verifiedItem||!expected||!$('listing-confirmed').checked){notice('请先核验当前状态并明确勾选确认。',true);return;}
+  if(state.listing_allowed_items!=null&&!state.listing_allowed_items.includes(item)){notice('商品不在允许写入列表。',true);return;}
+  const request={item_id:item,desired,expected,confirmed:true};
+  const signature=JSON.stringify(request);
+  if(pendingListing&&pendingListing.signature!==signature){notice('上一次请求结果尚未确定，请先在审计中核验；不要换目标或换键重试。',true);return;}
+  if(!pendingListing)pendingListing={signature,body:{...request,idempotency_key:crypto.randomUUID()}};
+  listingBusy=true;renderListingPolicy();
+  try {
+    const result=await api('/api/listings/state','POST',pendingListing.body);
+    $('listing-evidence').textContent=`操作 ${result.id}：${operationStates[result.status]||result.status}；读回 ${listingStates[result.after_state]||'未知'}。${result.error||''}`;
+    pendingListing=null;verifiedItem='';$('listing-expected').value='';$('listing-confirmed').checked=false;
+    await refreshOperations();
+  } catch(e){notice('请求未确认：'+e.message+'。保留相同幂等键；再次提交只查询/复用同一操作，请检查审计。',true);}
+  finally{listingBusy=false;renderListingPolicy();}
+});
 $('shop-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/shops','POST',{url:$('shop-url').value.trim()});$('shop-url').value='';await refresh();notice('店铺已保存，尚未采集。');}catch(e){notice(e.message,true);}});
 $('match-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/matches','POST',{own_key:$('own-product').value,competitor_key:$('competitor-product').value,confirmed:$('confirmed').checked});$('confirmed').checked=false;await refresh();notice('人工匹配已保存。');}catch(e){notice(e.message,true);}});
 $('refresh').addEventListener('click',()=>refresh().then(()=>notice('已刷新本地数据；未访问浏览器。')).catch(e=>notice(e.message,true)));

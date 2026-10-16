@@ -4,6 +4,7 @@ const {execFileSync} = require('node:child_process');
 const {JSDOM} = require('jsdom');
 const fs = require('node:fs');
 const scripts = JSON.parse(execFileSync(process.env.WZY_TEST_PYTHON || '.venv/bin/python', ['-c', 'import json; from wzy.collector import EXTRACT,NEXT_STATE,NEXT_CLICK; print(json.dumps([EXTRACT,NEXT_STATE,NEXT_CLICK]))'], {encoding:'utf8'}));
+const listingScripts = JSON.parse(execFileSync(process.env.WZY_TEST_PYTHON || '.venv/bin/python', ['-c', 'import json; from wzy.listings import PROBE,CLICK; print(json.dumps([PROBE,CLICK]))'], {encoding:'utf8'}));
 function dom(html) {
   const d = new JSDOM(html, {url:'https://wzyp.cn/merchant/goods/list',runScripts:'outside-only'});
   d.window.HTMLElement.prototype.getClientRects = function () {
@@ -47,6 +48,55 @@ test('explicit empty indicator survives extraction',()=>{
   const out=d.window.eval('('+scripts[0]+')()');
   assert.ok(out.includes('arco-empty'));
   assert.ok(out.includes('共 0 条'));
+});
+
+test('listing click is scoped to unique visible own row and exact status-cell action',()=>{
+  const row=(id)=>'<tr><td></td><td><a class="name" href="https://wzyp.cn/item/'+id+'">上架</a></td><td></td><td><span class="item-span">已下架</span><a class="toggle">上架</a><a>批量上架</a></td><td><a>上架</a></td></tr>';
+  const d=dom('<a>上架</a><div hidden class="arco-table"><table>'+row('synthetic')+'</table></div><div class="arco-table"><table><tbody>'+row('other')+row('synthetic')+'</tbody></table></div>');
+  let clicks=[];
+  d.window.document.querySelectorAll('a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();clicks.push(a);}));
+  const click=args=>d.window.eval('('+listingScripts[1]+')('+JSON.stringify(args)+')');
+  assert.equal(click({item_id:'synthetic',expected:'up',desired:'down'}),false);
+  assert.equal(click({item_id:'synthetic',expected:'down',desired:'up'}),true);
+  assert.equal(clicks.length,1);
+  assert.equal(clicks[0].className,'toggle');
+  d.window.document.querySelector('.arco-table:not([hidden]) tbody').insertAdjacentHTML('beforeend',row('synthetic'));
+  assert.equal(click({item_id:'synthetic',expected:'down',desired:'up'}),false);
+  assert.equal(clicks.length,1);
+});
+
+test('listing UI shows enable/allowlist, requires confirmation and preserves retry key',async()=>{
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/index.html','utf8'),{url:'http://127.0.0.1:8100',runScripts:'outside-only'});
+  const state={products:[],stores:[],comparisons:[],counts:{},listing_writes_enabled:true,listing_allowed_items:['synthetic']};
+  let posts=[];
+  d.window.fetch=async(path,opts)=>{
+    if(opts.method==='POST') {posts.push(JSON.parse(opts.body));throw new Error('network');}
+    return {ok:true,json:async()=>path==='/api/state'?state:path.startsWith('/api/listings/items/')?{state:'down',observed_at:'2026-10-16'}:[]};
+  };
+  d.window.eval(fs.readFileSync('src/wzy/static/app.js','utf8'));
+  await new Promise(r=>setImmediate(r));
+  const doc=d.window.document;
+  assert.ok(doc.getElementById('listing-policy').textContent.includes('synthetic'));
+  doc.getElementById('listing-item').value='synthetic';
+  doc.getElementById('listing-read').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(doc.getElementById('listing-expected').value,'down');
+  doc.getElementById('listing-form').dispatchEvent(new d.window.Event('submit',{cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.equal(posts.length,0);
+  doc.getElementById('listing-confirmed').checked=true;
+  for(let i=0;i<2;i++) {
+    doc.getElementById('listing-form').dispatchEvent(new d.window.Event('submit',{cancelable:true}));
+    await new Promise(r=>setImmediate(r));
+  }
+  assert.equal(posts.length,2);
+  assert.equal(posts[0].idempotency_key,posts[1].idempotency_key);
+  assert.equal(posts[0].expected,'down');
+  state.listing_writes_enabled=false;
+  doc.getElementById('refresh').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(doc.getElementById('listing-submit').disabled,true);
+  d.window.close();
 });
 
 test('workbench renders untrusted names as text and posts confirmed local matching', async()=>{

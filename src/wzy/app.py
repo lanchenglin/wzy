@@ -6,6 +6,8 @@ import io
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Literal
+import re
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -15,6 +17,16 @@ from pydantic import BaseModel, Field
 from .collector import BrowserCollector
 from .domain import Result
 from .store import Store
+from .listings import ListingBrowser, ListingError
+
+
+class ListingInput(BaseModel):
+    model_config = {'extra': 'forbid'}
+    item_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,128}$')
+    desired: Literal['up', 'down']
+    expected: Literal['up', 'down']
+    confirmed: Literal[True]
+    idempotency_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,128}$')
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -42,10 +54,17 @@ def safe_csv(value):
     return "'" + value if value.lstrip().startswith(('=', '+', '-', '@')) or value.startswith(('\t', '\r', '\n')) else value
 
 
-def create_app(db_path=None, *, collector=None):
+def create_app(db_path=None, *, collector=None, listing_browser=None):
     store = Store(db_path or os.environ.get('WZY_DB', 'data/wzy.sqlite3'))
     collect = collector or BrowserCollector(os.environ.get('WZY_CDP_URL', 'http://127.0.0.1:9224'), os.environ.get('WZY_ACCOUNT_LOCK'))
     busy = asyncio.Lock()
+    listing = listing_browser or ListingBrowser(os.environ.get('WZY_CDP_URL', 'http://127.0.0.1:9224'),
+        os.environ.get('WZY_ACCOUNT_LOCK') or Path.home() / '.cache/wzy/account.lock')
+    writes_enabled = os.environ.get('WZY_LISTING_WRITES_ENABLED', '').lower() == 'true'
+    raw_allowlist = os.environ.get('WZY_LISTING_ALLOWED_ITEMS')
+    allowed_items = None if raw_allowlist is None else sorted(set(x.strip() for x in raw_allowlist.split(',') if x.strip()))
+    if allowed_items is not None and any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', x) for x in allowed_items):
+        raise ValueError('invalid_listing_allowlist')
 
     @asynccontextmanager
     async def lifespan(app):
@@ -87,7 +106,7 @@ def create_app(db_path=None, *, collector=None):
 
     @app.get('/api/state')
     async def state():
-        return store.state()
+        return dict(store.state(), listing_writes_enabled=writes_enabled, listing_allowed_items=allowed_items)
 
     @app.get('/api/runs')
     async def runs():
@@ -132,9 +151,71 @@ def create_app(db_path=None, *, collector=None):
         store.remove_match(body.competitor_key)
         return {'ok': True}
 
+    @app.get('/api/listings/operations')
+    async def listing_operations():
+        return store.listing_operations()
+
+    @app.get('/api/listings/operations/{operation_id}')
+    async def listing_operation(operation_id: str):
+        operation = store.listing_operation(operation_id[:128])
+        if not operation:
+            raise HTTPException(404, '操作不存在')
+        return operation
+
+    @app.get('/api/listings/items/{item_id}')
+    async def listing_read(item_id: str):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', item_id):
+            raise HTTPException(422, '商品 ID 不合法')
+        if busy.locked():
+            raise HTTPException(409, '账号任务执行中')
+        async with busy:
+            try:
+                return await listing.read(item_id)
+            except Exception:
+                raise HTTPException(409, '状态读回失败，请人工检查登录、页面与账号锁') from None
+
+    @app.post('/api/listings/state')
+    async def listing_change(body: ListingInput):
+        if not writes_enabled:
+            raise HTTPException(403, '上下架写入未启用')
+        if allowed_items is not None and body.item_id not in allowed_items:
+            raise HTTPException(403, '商品不在允许写入列表')
+        data = body.model_dump()
+        previous = store.listing_operation(key=body.idempotency_key)
+        if previous:
+            if any(previous[k] != data[k] for k in ('item_id', 'desired', 'expected')):
+                raise HTTPException(409, '幂等键已用于其他请求')
+            return previous
+        if busy.locked():
+            raise HTTPException(409, '账号任务执行中')
+        async with busy:
+            try:
+                operation, created = store.start_listing(data)
+            except ValueError:
+                raise HTTPException(409, '幂等键已用于其他请求') from None
+            if not created:
+                return operation
+            operation_id = operation['id']
+            try:
+                result = await listing.change(body.item_id, body.desired, body.expected,
+                    lambda before: store.dispatch_listing(operation_id, before))
+                store.finish_listing(operation_id, **result)
+            except asyncio.CancelledError:
+                store.finish_listing(operation_id, status='uncertain', error='interrupted')
+                raise
+            except Exception as exc:
+                dispatched = store.listing_operation(operation_id)['dispatched_at'] is not None
+                safe_errors = {'stale_state', 'not_found', 'duplicate_target', 'unknown_state', 'page_unstable',
+                               'repeated_page', 'page_bound', 'pagination_unknown', 'pagination_changed',
+                               'action_missing', 'target_changed', 'no_existing_context'}
+                error = str(exc) if isinstance(exc, ListingError) and str(exc) in safe_errors else 'browser_unavailable'
+                store.finish_listing(operation_id, status='uncertain' if dispatched else 'rejected', error=error,
+                    before_state=exc.before_state if isinstance(exc, ListingError) else None)
+            return store.listing_operation(operation_id)
+
     @app.api_route('/api/listings/{path:path}', methods=['POST', 'PUT', 'PATCH', 'DELETE'])
     async def writes_disabled(path: str):
-        raise HTTPException(403, '第二阶段未授权：商品上架、编辑、删除功能禁用')
+        raise HTTPException(403, '仅授权受控上下架；编辑、删除、购买等功能禁用')
 
     @app.get('/api/export.json')
     async def export_json():

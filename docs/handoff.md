@@ -1,4 +1,48 @@
-# 第一阶段交接与验证记录
+# 交接与验证记录
+
+## 第二阶段受控上下架（2026-10-16，当前交付）
+
+下文第一阶段禁写描述为历史记录，不再代表本次授权范围。本次只新增自有商品真实上下架，编辑/删除/购买/支付/读取卡密仍禁止。未提交、未推送；未停止或连接父会话 8100 服务，未访问真实 CDP、profile、Cookie、storage、真实数据库或站点。
+
+### 实现
+
+- `src/wzy/listings.py`：固定自有列表、有界全页唯一 ID 检查（含跨页重复）、稳定状态、精确状态单元格动作、最多一次点击、等待状态后刷新独立读回。超时/断连不重试写入；无法确认报告 uncertain。
+- `src/wzy/app.py`：默认禁用的 POST `/api/listings/state`，环境开关/可选白名单、显式 expected/desired/confirmed、严格 ID 与幂等键边界；采集、读回、上下架共用应用互斥，浏览器任务共用账号 flock。
+- `src/wzy/store.py`：操作意图/派发在点击前持久化，幂等同键同载荷返回原操作、冲突 409；取消/启动恢复为 uncertain，审计 before/after 和时间；不覆盖完整库存快照。GET 审计与独立浏览器核验 API。
+- 中文界面展示真实开关与允许目标，先读回再逐次确认；网络错误保留原请求幂等键，禁止更改未确认载荷。审计使用 textContent；旧列表明确仍是采集快照。
+- README、AGENTS、可携带 Skill 已更新第二阶段边界、准确命令与恢复协议。
+
+### 合成验证（不是实时浏览器验收）
+
+先新增 Python 测试，初次因 `wzy.listings` 缺失失败；新增 UI 测试初次因 listing-policy 缺失失败，再实现转绿。
+
+```bash
+.venv/bin/python -m pytest -q
+npm test
+node --check src/wzy/static/app.js
+.venv/bin/python -m compileall -q src/wzy
+.venv/bin/python -m pip check
+git diff --check
+```
+
+结果：**62 pytest passed，7 DOM tests passed**，原 46 Python / 5 DOM 全部保留；JS/Python 编译、依赖、diff 检查通过。仍有一条 Starlette TestClient/httpx 上游弃用警告。未安装新依赖。
+
+覆盖：up/down、noop、陈旧状态、缺失/重复/跨页目标、分页上限、精确可见状态-cell selector、白名单/默认禁用、同键重放/冲突、点击前后超时与不明确读回、取消审计、成功/异常/取消任务页清理、共用 flock 与应用串行、UI 确认/网络重放键/XSS。全部使用合成页面和临时数据库。
+
+### 父会话待执行的真实验收
+
+父会话提供的事实：自有主表 `a.name` 指向 `/item/<id>`；td index 3 的 `.item-span` 为「已下架」/「销售中」，精确「上架」/「下架」直接生效，无确认 modal，刷新可核验。父会话已准备一次性、零库存测试商品，最终已下架；真实 ID 不写入代码或测试。该观察不是本编码会话实时验证。
+
+1. 父会话自行安排服务重启或使用空闲端口；同一数据库只能一个进程。按 README 命令设置 `WZY_LISTING_WRITES_ENABLED=true` 和 `WZY_LISTING_ALLOWED_ITEMS=<仅测试商品ID>`。
+2. 查看 `/api/state` 开关/白名单，中文界面输入测试 ID，只读核验 down；逐次确认 up，新幂等键，检查 succeeded 与 before/after；独立刷新核验 up。
+3. 逐次确认 down，另一个新幂等键；独立刷新核验 down。最终保持下架。原商品不得写入。
+4. 重放相同键应返回同操作 ID、不再点击；不同载荷同键应 409；关闭开关后 POST 应 403；检查 GET 审计与重启持久化。
+5. 核对任务新页结束清理、原有标签页/context/browser 未动。若真实 DOM 与 fixture 不符，先交回去敏结构补回归，不扩大 selector 或猜 API。
+6. uncertain 不自动重试，不换键盲目重试；人工查当前状态与审计后再决定新的明确意图。列表/SKU 完整性独立报告，不因写入成功将快照标 complete。
+
+---
+
+# 第一阶段交接与验证记录（历史）
 
 日期：2026-10-16。实现位于 `/home/lan/projects/wzy`，未提交、未推送。
 

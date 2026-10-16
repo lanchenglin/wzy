@@ -5,6 +5,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import sqlite3
+import uuid
 
 from .domain import DEFAULT_SHOP, OWN_URL, Result, shop_url
 
@@ -31,6 +32,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS matches (
                     competitor_key TEXT PRIMARY KEY, own_key TEXT NOT NULL, confirmed_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS observations_key ON observations(key);
+                CREATE TABLE IF NOT EXISTS listing_operations (
+                    id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
+                    item_id TEXT NOT NULL, desired TEXT NOT NULL, expected TEXT NOT NULL,
+                    status TEXT NOT NULL, before_state TEXT, after_state TEXT, error TEXT,
+                    created_at TEXT NOT NULL, dispatched_at TEXT, finished_at TEXT);
             ''')
             if 'pagination_terminal' not in {r['name'] for r in db.execute('PRAGMA table_info(runs)')}:
                 db.execute("ALTER TABLE runs ADD COLUMN pagination_terminal TEXT NOT NULL DEFAULT 'not_observed'")
@@ -71,8 +77,41 @@ class Store:
             db.executemany('INSERT INTO observations(run_id,key,payload) VALUES(?,?,?)',
                 [(run_id, p.key, json.dumps(asdict(p), ensure_ascii=False)) for p in result.products])
 
+    def listing_operation(self, operation_id=None, *, key=None):
+        with self.connection() as db:
+            row = db.execute('SELECT * FROM listing_operations WHERE ' + ('id=?' if operation_id else 'idempotency_key=?'),
+                             (operation_id or key,)).fetchone()
+            return dict(row) if row else None
+
+    def listing_operations(self):
+        with self.connection() as db:
+            return [dict(r) for r in db.execute('SELECT * FROM listing_operations ORDER BY created_at DESC LIMIT 100')]
+
+    def start_listing(self, body):
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM listing_operations WHERE idempotency_key=?', (body['idempotency_key'],)).fetchone()
+            if row:
+                if any(row[k] != body[k] for k in ('item_id', 'desired', 'expected')):
+                    raise ValueError('idempotency_conflict')
+                return dict(row), False
+            operation_id = str(uuid.uuid4())
+            db.execute('INSERT INTO listing_operations(id,idempotency_key,item_id,desired,expected,status,created_at) VALUES(?,?,?,?,?,?,?)',
+                       (operation_id, body['idempotency_key'], body['item_id'], body['desired'], body['expected'], 'pending', now()))
+            return dict(db.execute('SELECT * FROM listing_operations WHERE id=?', (operation_id,)).fetchone()), True
+
+    def dispatch_listing(self, operation_id, before):
+        with self.connection() as db:
+            db.execute("UPDATE listing_operations SET status='dispatched',before_state=?,dispatched_at=? WHERE id=?", (before, now(), operation_id))
+
+    def finish_listing(self, operation_id, *, status, before_state=None, after_state=None, error=None):
+        with self.connection() as db:
+            db.execute('UPDATE listing_operations SET status=?,before_state=COALESCE(?,before_state),after_state=?,error=?,finished_at=? WHERE id=?',
+                       (status, before_state, after_state, error, now(), operation_id))
+
     def recover_interrupted(self):
         with self.connection() as db:
+            db.execute("UPDATE listing_operations SET status='uncertain',error='interrupted',finished_at=? WHERE status IN ('pending','dispatched')", (now(),))
             db.execute("UPDATE runs SET status='failed',finished=?,errors='[\"interrupted\"]' WHERE status='running'", (now(),))
 
     def runs(self):

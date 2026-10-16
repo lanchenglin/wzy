@@ -2,9 +2,9 @@
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WZY 商品核对台</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
 <body>
-<header><div class="brand">WZY <span>商品核对台</span></div><span class="readonly">第一阶段 · 只读采集</span></header>
+<header><div class="brand">WZY <span>商品核对台</span></div><span class="readonly">只读采集 · 受控上下架</span></header>
 <main>
-<section class="intro"><h1>先看全，再核对。</h1><p>汇集竞品与自有库存，保留价格证据。匹配由你确认，商品状态不会被修改。</p></section>
+<section class="intro"><h1>先看全，再核对。</h1><p>汇集竞品与自有库存，保留价格证据。匹配由你确认，上下架需独立启用并逐次明确授权。</p></section>
 <p id="notice" role="status" aria-live="polite">正在加载本地工作台…</p>
 <section aria-labelledby="sources-title"><div class="section-head"><h2 id="sources-title">采集来源</h2><button id="refresh" class="secondary">刷新本地数据</button></div><div id="sources"></div>
 <form id="shop-form"><label for="shop-url">添加竞品店铺</label><input id="shop-url" type="url" required placeholder="https://wzyp.cn/shop/店铺ID" maxlength="160"><button>添加店铺</button></form>
@@ -15,8 +15,19 @@
 <section aria-labelledby="match-title"><h2 id="match-title">人工匹配</h2><p class="hint">核对套餐、期限与交付方式后再确认。名称相似不代表同一 SKU；本版本不自动匹配。</p>
 <form id="match-form"><label for="own-product">自有商品</label><select id="own-product" required></select><label for="competitor-product">竞品商品</label><select id="competitor-product" required></select><label class="confirmation"><input id="confirmed" type="checkbox" required>我已核对两侧商品含义，确认匹配</label><button>保存匹配</button></form>
 <div class="table-scroll"><table><thead><tr><th>自有商品</th><th>竞品商品</th><th>自有价 − 竞品价</th><th>证据</th><th>操作</th></tr></thead><tbody id="matches"></tbody></table></div></section>
+<section aria-labelledby="listing-title"><h2 id="listing-title">自有商品 · 受控上下架</h2>
+<p id="listing-policy" class="hint"></p>
+<p class="hint">真实修改平台状态，不涉及价格、库存、编辑或删除。先读回当前状态，再确认明确目标；超时不得换键盲目重试。采集快照不会被此操作伪装为完整新快照。</p>
+<form id="listing-form">
+<label for="listing-item">自有商品 ID（不是标题或竞品标识）</label><input id="listing-item" required maxlength="128" pattern="[A-Za-z0-9_-]+">
+<button id="listing-read" type="button" class="secondary">只读核验当前状态</button>
+<label for="listing-expected">已核验的预期状态</label><select id="listing-expected" required disabled><option value="">尚未核验</option value="up">销售中</option><option value="down">已下架</option></select>
+<label for="listing-desired">目标状态</label><select id="listing-desired"><option value="up">上架（销售中）</option><option value="down">下架（已下架）</option></select>
+<label class="confirmation"><input id="listing-confirmed" type="checkbox" required>我确认该自有商品 ID、当前状态及目标状态，授权这一次真实上下架</label>
+<button id="listing-submit" disabled>执行已确认目标</button>
+</form><p id="listing-evidence" role="status"></p><h3>最近操作审计</h3><div id="listing-operations"></div></section>
 <section aria-labelledby="runs-title"><h2 id="runs-title">最近采集记录</h2><div id="runs" class="run-list"></div></section>
-<footer>商品列表完整性与 SKU 覆盖是两回事。SKU 细节覆盖：未知。第二阶段商品写入：未授权、已禁用。</footer>
+<footer>商品列表完整性与 SKU 覆盖是两回事。SKU 细节覆盖：未知。上下架默认禁用；启用后仍需核验、确认与审计。其他商品写入未授权。</footer>
 </main>
 <dialog id="history-dialog"><div class="section-head"><h2 id="history-title">价格历史</h2><button id="close-history" class="secondary">关闭</button></div><div id="history-content"></div></dialog>
 </body></html>

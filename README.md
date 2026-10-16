@@ -1,6 +1,6 @@
 # WZY 商品核对台
 
-独立、中文、本地优先的商品只读工作台。第一阶段支持竞品全分类采集、自有库存分页采集、SQLite 价格历史、人工确认匹配与 JSON/CSV 导出。**不支持、也不授权商品上架、下架、编辑、删除或购买。** 没有假定的平台写入 API。
+独立、中文、本地优先的商品工作台。第一阶段支持竞品全分类采集、自有库存分页采集、SQLite 价格历史、人工确认匹配与 JSON/CSV 导出。第二阶段支持**默认禁用、显式授权的自有商品真实上下架**，使用已观察的精确 DOM 动作，不猜测平台写入 API。**编辑、删除、购买、支付及库存秘密读取仍未授权。**
 
 ## 安装和启动（Linux / WSL，Python 3.11+）
 
@@ -57,7 +57,32 @@ WZY_DB=data/wzy.sqlite3 \
 
 主要接口：`GET /api/state`、`GET /api/runs`、`GET /api/history?key=...`、`POST /api/shops`、`POST /api/collect`、`POST/DELETE /api/matches`、`GET /api/export.json`、`GET /api/export.csv`。接口用于本地工作台，不是站点商家 API。
 
-本地修改请求须带与 Host 完全一致的 `Origin: http://127.0.0.1:8100` 以及 `X-WZY-Request: 1`；不开放 CORS。Host 限定 loopback。不能把此边界当成多用户认证；同机恶意进程不在防护范围。所有 `/api/listings/*` 修改请求返回 403。外部目标仅允许严格店铺 URL 与固定商家路径。
+本地修改请求须带与 Host 完全一致的 `Origin: http://127.0.0.1:8100` 以及 `X-WZY-Request: 1`；不开放 CORS。Host 限定 loopback。不能把此边界当成多用户认证；同机恶意进程不在防护范围。仅 `POST /api/listings/state` 在显式启用且逐次确认时可写；其余 `/api/listings/*` 修改请求返回 403。外部目标仅允许严格店铺 URL 与固定商家路径。
+
+## 第二阶段：受控真实上下架
+
+仅由已获授权的操作会话执行；编码测试不得访问真实 CDP/数据库。父会话当前服务不由编码会话重启。父会话自行选择空闲端口及验收数据库，例如：
+
+```bash
+# 将 TEST_ITEM_ID 替换为本次授权的自有零库存测试商品 ID；不要填 URL/标题/竞品 key。
+WZY_LISTING_WRITES_ENABLED=true \
+WZY_LISTING_ALLOWED_ITEMS=TEST_ITEM_ID \
+WZY_CDP_URL=http://127.0.0.1:9224 \
+WZY_DB=data/wzy.sqlite3 \
+.venv/bin/wzy --port 8101
+```
+
+- `WZY_LISTING_WRITES_ENABLED` 只有 `true`（不区分大小写）启用，默认 false。配置在进程启动时读取。
+- `WZY_LISTING_ALLOWED_ITEMS` 是逗号分隔的严格商品 ID；未设置表示无额外白名单（仍必须存在于自有库存），设置为空表示全部拒绝。验收必须仅填一次性测试商品。非法配置拒绝启动。
+- 页面「自有商品 · 受控上下架」明确显示开关/白名单。输入 ID →「只读核验当前状态」→ 选择目标 → 勾选逐次授权 → 提交。相同请求网络失败后保留幂等键；不要刷新页面后换键盲目重试，应查审计并人工核验。
+- `GET /api/listings/items/<id>` 新建任务页只读核验自有列表；`GET /api/listings/operations` 返回最近 100 条持久审计；`GET /api/listings/operations/<operation-id>` 查单项。这些 GET 不点击上下架。
+- `POST /api/listings/state` 请求格式：`{"item_id":"TEST_ITEM_ID","desired":"up","expected":"down","confirmed":true,"idempotency_key":"unique-request-001"}`。状态只接受 `up` / `down`，ID 只接受字母数字下划线连字符；不得传标题、URL 或竞品回退 key。必须带同源 Origin 和 X-WZY-Request。
+- 同键同载荷返回原操作，绝不再次执行；同键不同载荷 409。先拒绝陈旧 expected，再判定 noop。通过全列表有界分页确认唯一 ID，重新定位该行，在状态单元格验证精确状态与「上架」/「下架」链接后最多点击一次。最大 50 页、单浏览器任务 180 秒。
+- 审计在外部副作用前提交，记录 ID、预期/目标、before/after、派发/结束时间和安全错误码。`succeeded` 表示刷新后的独立读回达到目标，`noop` 无需点击，`rejected` 拒绝，`uncertain` 表示不能证明结果。断连/超时只尝试有界只读读回，不重试点击；取消/启动恢复一律保守标记 uncertain。平台不提供原子比较交换，人工/其他不遵守锁的并发操作无法由本地锁防止。
+- 上下架结果是独立状态证据，**不覆盖旧库存完整快照、不宣称列表/SKU 完整**。需要更新商品列表时另行只读采集。
+- 采集、核验与写入使用同一应用互斥和 WZY_ACCOUNT_LOCK；仅一个 Web 进程使用同一数据库。只清理任务页，不关闭借用的浏览器/context。进程被强杀遗留任务页需人工识别。
+
+父会话真实验收：白名单仅测试商品 → 核验 down → up（新键）→ 刷新独立读回 up → down（另一个新键）→ 刷新独立读回 down → 同键重放不产生新点击 → 查看持久审计。最终恢复下架。不得对原商品或竞品执行写入；尚未由本编码会话进行真实验收。
 
 ## 测试与交接
 
