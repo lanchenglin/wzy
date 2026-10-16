@@ -1,6 +1,6 @@
 ---
 name: wzy-workbench
-description: Use when 在 Linux/WSL 使用 WZY 进行 wzyp.cn 竞品对比、自有库存采集、受控真实上下架、幂等审计、价格核验、人工匹配，或跨 AI 接手工作台时。
+description: Use when 在 Linux/WSL 使用 WZY 进行 wzyp.cn 多店竞品对比、匹配建议、定时只读采集、本地通知、自有库存采集、受控真实上下架、幂等审计、价格核验、人工匹配，或跨 AI 接手工作台时。
 ---
 
 # WZY 工作台：只读采集与受控上下架
@@ -57,6 +57,66 @@ WZY_CDP_URL=http://127.0.0.1:9224 WZY_DB=data/wzy.sqlite3 \
 7. 父会话验收顺序：测试商品 down → up（独立新键）→ 刷新读回 up → down（独立新键）→ 刷新读回 down；重放旧键不再次点击，审计持久化，原商品不变，任务页清理且原页未动。最终下架。代码中的测试 ID 均为合成值，不携带真实数据库/profile。
 
 开发验证：`.venv/bin/python -m pytest -q`、`npm test`、`node --check src/wzy/static/app.js`、`.venv/bin/python -m compileall -q src/wzy`、`.venv/bin/python -m pip check`。合成通过不等于真实验收通过，按 docs/handoff.md 单独报告。
+
+## 第三阶段：建议、比较、调度与本地通知
+
+### 证据协议
+
+- 全商品（含未匹配）与人工确认的多店分组见 `/api/state` 的 `products`、`groups`；已有匹配不自动改写。建议 `suggestions` 仅用本地文本规则提取系列/型号/套餐/额度/期限/交付/质保，展示 unknown/conflicts/reasons；置信度不是同 SKU 概率。带入表单后仍须人工勾选保存，不因词相似自动确认。无外部 LLM。
+- 完整快照主价格保留；较新 partial 价格独立在 `latest_observation`，带 run_id/collected_at/quality；不得用它伪装完整快照。`freshness` 以主快照 observed_at 到当前 UTC 的 0–7200 秒（含边界）判断；未来/无效时间不新鲜，独立于完整性。差价 = 自有 − 竞品，百分比以竞品价为分母，Decimal 两位；零分母未知。
+- 最低可用竞品须人工确认、两侧新鲜/完整/身份明确且竞品明确有货、价格已知。partial/unknown、过期、未知库存/缺货都排除。完整列表仍不证明 SKU 细节，当前覆盖始终未知。
+
+### 定时只读操作
+
+默认每来源关闭，默认间隔 60 分钟，可设 15–1440。UI 或下列 API 保存后等完整间隔才执行；重启/全局恢复重新安排，不补跑。调度器每 5 秒检查，最多一个 180 秒有界任务，与手动采集经过相同 coordinator，和核验/上下架共用应用锁及账号 flock。**调度器从不调用上下架。**
+
+只有独立授权的父会话在验收稳定后启用（编码会话不得执行真实命令）：
+
+```bash
+BASE=http://127.0.0.1:8101
+curl --fail --silent "$BASE/api/scheduler"
+curl --fail --silent -X PUT "$BASE/api/scheduler/sources/2" \
+  -H "Origin: $BASE" -H 'X-WZY-Request: 1' -H 'Content-Type: application/json' \
+  --data '{"enabled":true,"interval_minutes":60,"resume":false}'
+curl --fail --silent -X PUT "$BASE/api/scheduler" \
+  -H "Origin: $BASE" -H 'X-WZY-Request: 1' -H 'Content-Type: application/json' \
+  --data '{"paused":true}'
+# 人工处理登录/挑战后显式恢复来源（不取消全局暂停）：
+curl --fail --silent -X PUT "$BASE/api/scheduler/sources/2" \
+  -H "Origin: $BASE" -H 'X-WZY-Request: 1' -H 'Content-Type: application/json' \
+  --data '{"enabled":true,"interval_minutes":60,"resume":true}'
+# 恢复全局运行：
+curl --fail --silent -X PUT "$BASE/api/scheduler" \
+  -H "Origin: $BASE" -H 'X-WZY-Request: 1' -H 'Content-Type: application/json' \
+  --data '{"paused":false}'
+```
+
+全局暂停只阻止后续定时任务；手动 POST `/api/collect`（载荷 `{"store_id":2}`，同源 Origin/X-WZY-Request）仍可执行，已开始的任务会完成。paused/登录挑战会持久阻断来源，手动成功不自动解除；普通失败指数退避，最大 24 小时。partial 不被转换成失败或完整。`last_attempt`、`last_success`（完整采集）、`last_outcome`、`browser_evidence`、`next_run` 是持久实际调用记录，不保证浏览器现在健康。
+
+同 DB 新版服务由 `<数据库真实绝对路径>.instance.lock` 排他锁保护，先取得锁才 recover_interrupted；第二实例拒绝启动。不要删除运行中锁文件、使用硬链接数据库别名、多 worker 或与不支持此锁的旧服务共享 DB。父服务 8100 不由编码会话停止/重启；父会话自行安排迁移。退出取消采集，清理两次各最多 5 秒，反复取消不丢失子任务。清理仍卡住时 fail-closed 禁止所有新浏览器操作，需人工检查/重启；强杀可能遗留任务页。重启恢复 interrupted 也更新诊断和调度结果，重排保留失败退避。
+
+### 通知与验证
+
+仅持久站内收件箱，**无钉钉配置、无外部推送**；不访问任何其他设置/token。首次商品观察只作基线；之后比较该商品实际观察（包括较新部分观察），不只比完整快照。只发价格涨跌和明确有货↔缺货；未知/缺失不推断变化或删除。partial 通知显示警告，不作交易信号；failed/paused 不发价格通知，诊断仅按状态转换一次。事件按运行聚合、持久 ID 去重，刷新本地数据查看最新一页 100 条及全部未读计数；返回 `next_before_run` 时用 `GET /api/notifications?before_run=<该值>` 翻更早一页，UI「更早通知/最新通知」可管理历史未读。
+
+```bash
+curl --fail --silent "$BASE/api/notifications"
+# 用 GET 返回的真实本地事件 id 替换 run:123:changes；不猜事件：
+curl --fail --silent -X PATCH "$BASE/api/notifications/run:123:changes" \
+  -H "Origin: $BASE" -H 'X-WZY-Request: 1' -H 'Content-Type: application/json' \
+  --data '{"read":true,"acknowledged":true}'
+# 标未读：同一 PATCH，载荷 {"read":false,"acknowledged":false}
+```
+
+合成时钟验收（不连接浏览器、不等真实 60 分钟）：
+
+```bash
+.venv/bin/python -m pytest tests/test_scheduler.py -q
+.venv/bin/python -m pytest tests/test_comparison.py tests/test_notifications.py tests/test_api.py -q
+npm test
+```
+
+`tests/test_scheduler.py` 的 Clock.advance 驱动真实 coordinator + 临时 SQLite，采集器返回合成 Result。这是时间逻辑验证，不是 60 分钟真实采集成功证明；没有生产加速时钟 API。真实验收与等待真实 next_run 的步骤见 `docs/handoff.md`。
 
 ## 禁止与常见误区
 

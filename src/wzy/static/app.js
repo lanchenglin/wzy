@@ -26,8 +26,10 @@ function action(label, handler, secondary=false) {
 function time(value) { return value ? new Date(value).toLocaleString('zh-CN') : '暂无'; }
 async function refresh() {
   state = await api('/api/state');
-  renderSources(); renderProducts(); renderMatches(); renderListingPolicy();
+  renderSources(); renderProducts(); renderMatches(); renderListingPolicy(); renderGroups(); renderSuggestions();
   await refreshOperations();
+  await refreshSchedules();
+  await refreshInbox();
   const runs = await api('/api/runs');
   $('runs').replaceChildren(...runs.map(r=>el('p', `#${r.id}　${time(r.started)}　${statusNames[r.status]}　实际 ${r.actual_count??'—'} / 声明 ${r.declared_count??'未知'}　${r.errors.join('、')}`)));
   if (!runs.length) $('runs').append(el('p','还没有采集记录。请在上方选择来源开始只读采集。'));
@@ -58,7 +60,8 @@ function renderProducts() {
     source.append(el('small',p.category||'自有库存')); title.append(el('small',p.description||''));
     if(p.consignment) title.append(el('small','代销'));
     const evidence=el('td',p.provisional?'暂存观察，非完整快照':p.stale?'保留完整快照，当前采集异常':'完整快照');
-    evidence.append(el('small',time(p.observed_at)),el('small','SKU 覆盖未知'));
+    evidence.append(el('small',time(p.observed_at)),el('small',`${p.freshness==='fresh'?'时间新鲜':'时间陈旧或未知'}；SKU 覆盖未知`));
+    if(p.latest_observation && p.latest_observation.run_id!==p.run_id) evidence.append(el('small',`较新暂存观察 ¥${p.latest_observation.price??'未知'}；#${p.latest_observation.run_id}；${time(p.latest_observation.collected_at)}；${statusNames[p.latest_observation.quality]}`));
     const history=el('td'); history.append(action('历史',()=>showHistory(p),true));
     tr.append(source,title,el('td',p.price===null?'价格未知':`¥ ${p.price}`,'money'),el('td',`${p.stock||'库存未知'} / ${p.status||'状态未采集'}`),evidence,history); return tr;
   }));
@@ -78,6 +81,76 @@ function renderMatches() {
     tr.append(el('td',m.own?.title||'当前快照无此自有商品'),el('td',m.competitor?.title||'当前快照无此竞品'),el('td',m.difference===null?'无法比较':`¥ ${m.difference}`,'money'),el('td',m.needs_review?'身份缺失或不明确，需重新核对':m.stale?'数据陈旧或一侧缺失':'人工已确认'),controls);return tr;
   }));
 }
+const detailNames={family:'产品系列',model:'型号',plan:'套餐',quota:'额度',duration:'期限',delivery:'交付方式',warranty:'质保'};
+function productEvidence(p) {
+  if(!p)return '商品缺失，需核对';
+  return `${p.stock||'库存未知'} / ${p.status||'状态未知'}；${p.freshness==='fresh'?'时间新鲜':'时间陈旧或未知'}；${statusNames[p.quality]||'完整性未知'}；#${p.run_id??'—'} ${time(p.collected_at||p.observed_at)}；SKU 覆盖未知`;
+}
+function renderGroups() {
+  const rows=[];
+  for(const group of state.groups||[]) {
+    for(const c of group.competitors.length?group.competitors:[null]) {
+      const tr=el('tr'), own=group.own, comp=c?.product;
+      const left=el('td',own?`${own.title} / ¥${own.price??'未知'}`:'无自有匹配');
+      left.append(el('small',productEvidence(own)));
+      const right=el('td',comp?`${state.stores.find(s=>s.id===comp.store_id)?.name||'店铺 #'+comp.store_id} / ${comp.title} / ¥${comp.price??'未知'}`:'无竞品或身份缺失');
+      right.append(el('small',c?.confirmed?'人工确认组':'未匹配'));
+      const proof=el('td',productEvidence(comp));
+      if(comp?.latest_observation&&comp.latest_observation.run_id!==comp.run_id) proof.append(el('small',`较新暂存 ¥${comp.latest_observation.price??'未知'} #${comp.latest_observation.run_id} ${time(comp.latest_observation.collected_at)} ${statusNames[comp.latest_observation.quality]}`));
+      tr.append(left,right,el('td',`¥${c?.difference??'未知'} / ${c?.percentage==null?'未知':c.percentage+'%'}${c?.usable?'':'（参考证据，不可靠比较）'}`),proof,el('td',group.lowest_available?`${state.stores.find(s=>s.id===group.lowest_available.store_id)?.name||'店铺 #'+group.lowest_available.store_id} / ${group.lowest_available.title} ¥${group.lowest_available.price}`:'无符合条件的证据'));
+      rows.push(tr);
+    }
+  }
+  $('comparison-groups').replaceChildren(...rows);
+}
+function renderSuggestions() {
+  $('suggestions').replaceChildren(...(state.suggestions||[]).map(s=>{
+    const own=state.products.find(p=>p.key===s.own_key), comp=state.products.find(p=>p.key===s.competitor_key);
+    const row=el('details'), summary=el('summary',`${own?.title||s.own_key} / ${comp?.title||s.competitor_key}：${{low:'低置信度',medium:'中等置信度',conflict:'存在冲突'}[s.confidence]}`);
+    row.append(summary,el('p',`相同明确字段：${s.reasons.map(k=>detailNames[k]).join('、')||'无'}；冲突：${s.conflicts.map(k=>detailNames[k]).join('、')||'未发现（不代表等价）'}；未知：${s.unknown.map(k=>detailNames[k]).join('、')||'无'}`));
+    for(const [key,label] of Object.entries(detailNames)) row.append(el('p',`${label}：自有 ${s.own_fields[key]??'未知'} / 竞品 ${s.competitor_fields[key]??'未知'}`));
+    row.append(action('带入人工核对表单',()=>{$('own-product').value=s.own_key;$('competitor-product').value=s.competitor_key;$('confirmed').checked=false;$('confirmed').focus();notice('仅带入候选，尚未保存。请核对冲突与未知字段后逐次确认。');},true));
+    return row;
+  }));
+}
+let scheduleState={paused:false,sources:[]};
+async function refreshSchedules() {
+  scheduleState=await api('/api/scheduler');
+  $('scheduler-pause').textContent=scheduleState.paused?'恢复全局定时任务':'暂停全部定时任务';
+  $('scheduler-status').textContent=`${scheduleState.paused?'全局已暂停':'全局未暂停（仅启用的来源会运行）'}；${scheduleState.busy?'账号任务执行中':'当前无应用账号任务'}`;
+  $('schedules').replaceChildren(...(scheduleState.sources||[]).map(s=>{
+    const form=el('form');form.id='schedule-'+s.store_id;
+    const enabled=el('input');enabled.type='checkbox';enabled.checked=s.enabled;
+    const enabledLabel=el('label',`${state.stores.find(x=>x.id===s.store_id)?.name||'来源 #'+s.store_id}：启用定时只读采集 `);enabledLabel.append(enabled);
+    const interval=el('input');interval.type='number';interval.min='15';interval.max='1440';interval.step='1';interval.required=true;interval.value=s.interval_minutes;
+    const intervalLabel=el('label','间隔（分钟） ');intervalLabel.append(interval);
+    const resume=el('input');resume.type='checkbox';
+    const resumeLabel=el('label','已人工处理登录/挑战，恢复此来源 ');resumeLabel.append(resume);resumeLabel.hidden=!s.blocked;
+    const submit=el('button','保存定时设置');submit.type='submit';
+    form.append(enabledLabel,intervalLabel,resumeLabel,submit,el('p',`下次 ${time(s.next_run)}；最后尝试 ${time(s.last_attempt)}；最后完整成功 ${time(s.last_success)}；结果 ${statusNames[s.last_outcome]||'尚无'}；浏览器历史证据 ${{not_observed:'未调用',observed:'已观察页面',login_or_challenge:'登录/挑战',unavailable_or_failed:'不可用或采集失败'}[s.browser_evidence]||'未知'}${s.blocked?'；来源已阻断，需人工恢复':''}`,'hint'));
+    form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{await api('/api/scheduler/sources/'+s.store_id,'PUT',{enabled:enabled.checked,interval_minutes:Number(interval.value),resume:resume.checked});await refreshSchedules();notice('定时设置已保存；不会立即补跑。');}catch(error){notice(error.message,true);}finally{submit.disabled=false;}});
+    return form;
+  }));
+}
+$('scheduler-pause').addEventListener('click',async()=>{try{await api('/api/scheduler','PUT',{paused:!scheduleState.paused});await refreshSchedules();}catch(e){notice(e.message,true);}});
+let inboxCursor=null, inboxNext=null;
+async function refreshInbox(cursor=null) {
+  inboxCursor=cursor;
+  const inbox=await api('/api/notifications'+(cursor?'?before_run='+cursor:''));
+  inboxNext=inbox.next_before_run;
+  $('inbox-older').disabled=!inboxNext;
+  $('inbox-summary').textContent=`未读 ${inbox.unread??0} 条；${cursor?'较早':'最新'}一页最多 100 条运行聚合通知。无外部推送。`;
+  $('inbox').replaceChildren(...(inbox.events||[]).map(event=>{
+    const row=el('article');
+    row.append(el('h3',`#${event.run_id} ${statusNames[event.quality]||'未知'} ${event.kind==='diagnostic'?'采集状态变化':'已观察商品变化'}${event.read?'（已读）':'（未读）'}${event.acknowledged?'（已确认）':''}`),el('p',`${time(event.created_at)}；${event.quality==='complete'?'列表完整仍不代表 SKU 完整':'部分/未知/失败证据，不是可交易信号'}`,'hint'));
+    for(const c of event.changes)row.append(el('p',`${c.title}：${{price_up:'价格上涨',price_down:'价格下降',stock:'明确库存状态变化'}[c.type]||c.type} ${c.before} → ${c.after}`));
+    const update=async(read,acknowledged)=>{await api('/api/notifications/'+encodeURIComponent(event.id),'PATCH',{read,acknowledged});await refreshInbox(inboxCursor);};
+    row.append(action(event.read?'标为未读':'标为已读',()=>update(!event.read,false),true),action('确认通知',()=>update(true,true),true));
+    return row;
+  }));
+}
+$('inbox-older').addEventListener('click',()=>refreshInbox(inboxNext).catch(e=>notice(e.message,true)));
+$('inbox-latest').addEventListener('click',()=>refreshInbox().catch(e=>notice(e.message,true)));
 async function showHistory(p) {
   const rows=await api('/api/history?key='+encodeURIComponent(p.key));
   $('history-title').textContent=p.title+' · 价格历史';
@@ -136,4 +209,4 @@ $('match-form').addEventListener('submit',async e=>{e.preventDefault();try{await
 $('refresh').addEventListener('click',()=>refresh().then(()=>notice('已刷新本地数据；未访问浏览器。')).catch(e=>notice(e.message,true)));
 $('filter').addEventListener('change',renderProducts);$('search').addEventListener('input',renderProducts);
 $('close-history').addEventListener('click',()=>$('history-dialog').close());
-refresh().then(()=>notice('本地工作台已就绪。只读采集需要你主动启动。')).catch(e=>notice(e.message,true));
+refresh().then(()=>notice('本地工作台已就绪。定时采集仅运行显式启用的来源；刷新本地数据查看最新通知。')).catch(e=>notice(e.message,true));

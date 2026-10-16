@@ -9,10 +9,13 @@
 <section aria-labelledby="sources-title"><div class="section-head"><h2 id="sources-title">采集来源</h2><button id="refresh" class="secondary">刷新本地数据</button></div><div id="sources"></div>
 <form id="shop-form"><label for="shop-url">添加竞品店铺</label><input id="shop-url" type="url" required placeholder="https://wzyp.cn/shop/店铺ID" maxlength="160"><button>添加店铺</button></form>
 <p class="hint">采集使用已人工登录的专用浏览器。遇到登录、验证或分页不明会停止；不会自动重试。</p></section>
+<section aria-labelledby="scheduler-title"><div class="section-head"><h2 id="scheduler-title">定时只读采集</h2><button id="scheduler-pause" class="secondary">暂停全部定时任务</button></div><p id="scheduler-status" role="status"></p><p class="hint">默认关闭，间隔 15–1440 分钟。全局暂停不影响手动采集，已开始的任务会完成。登录/挑战后需人工处理并恢复来源。重启不补跑。浏览器证据只代表标注时间的实际调用，不是当前健康保证。</p><div id="schedules"></div></section>
+<section aria-labelledby="comparison-title"><h2 id="comparison-title">多店综合比较</h2><p class="hint">包含未匹配商品。差价 = 自有价 − 竞品价；百分比以竞品价为分母，零价为未知。最低价仅使用人工确认、两侧新鲜且完整、竞品明确有货的证据（新鲜窗口 2 小时）；SKU 细节覆盖仍未知，不能作为自动交易信号。</p><div class="table-scroll"><table><thead><tr><th>自有商品 / 价格</th><th>竞品店铺 / 商品 / 价格</th><th>差价 / 百分比</th><th>库存、时间与覆盖</th><th>组内最低可用竞品</th></tr></thead><tbody id="comparison-groups"></tbody></table></div></section>
 <section aria-labelledby="products-title"><div class="section-head"><h2 id="products-title">全部商品</h2><nav aria-label="数据导出"><a href="/api/export.json" download="wzy.json">导出 JSON</a><a href="/api/export.csv">导出 CSV</a></nav></div>
 <div class="filters"><label for="filter">查看</label><select id="filter"><option value="all">全部商品</option><option value="competitor">竞品商品</option><option value="own">自有库存</option><option value="pending">待匹配</option></select><label for="search">搜索</label><input id="search" type="search" placeholder="商品名称或分类"></div>
 <p id="summary" class="hint"></p><div class="table-scroll"><table><thead><tr><th>来源 / 分类</th><th>商品</th><th>展示价格</th><th>库存 / 上下架</th><th>证据状态</th><th>记录</th></tr></thead><tbody id="products"></tbody></table></div><p id="empty" class="empty" hidden>暂无商品。请先采集来源；无数据不代表库存为空。</p></section>
 <section aria-labelledby="match-title"><h2 id="match-title">人工匹配</h2><p class="hint">核对套餐、期限与交付方式后再确认。名称相似不代表同一 SKU；本版本不自动匹配。</p>
+<h3>匹配建议（不自动保存）</h3><p class="hint">规则只提取明确文本，未识别不代表相同。置信度是规则证据强弱，不是同 SKU 概率；冲突必须人工核对。</p><div id="suggestions"></div>
 <form id="match-form"><label for="own-product">自有商品</label><select id="own-product" required></select><label for="competitor-product">竞品商品</label><select id="competitor-product" required></select><label class="confirmation"><input id="confirmed" type="checkbox" required>我已核对两侧商品含义，确认匹配</label><button>保存匹配</button></form>
 <div class="table-scroll"><table><thead><tr><th>自有商品</th><th>竞品商品</th><th>自有价 − 竞品价</th><th>证据</th><th>操作</th></tr></thead><tbody id="matches"></tbody></table></div></section>
 <section aria-labelledby="listing-title"><h2 id="listing-title">自有商品 · 受控上下架</h2>
@@ -26,6 +29,7 @@
 <label class="confirmation"><input id="listing-confirmed" type="checkbox" required>我确认该自有商品 ID、当前状态及目标状态，授权这一次真实上下架</label>
 <button id="listing-submit" disabled>执行已确认目标</button>
 </form><p id="listing-evidence" role="status"></p><h3>最近操作审计</h3><div id="listing-operations"></div></section>
+<section aria-labelledby="inbox-title"><h2 id="inbox-title">本地变更通知</h2><p class="hint">仅站内持久收件箱，未配置钉钉或其他外部推送。首次观察建立基线；部分采集只说明已观察的变化，不代表完整或可交易。按运行聚合，缺失不等于删除。</p><p id="inbox-summary" role="status"></p><div id="inbox"></div><button id="inbox-latest" class="secondary">最新通知</button> <button id="inbox-older" class="secondary" disabled>更早通知</button></section>
 <section aria-labelledby="runs-title"><h2 id="runs-title">最近采集记录</h2><div id="runs" class="run-list"></div></section>
 <footer>商品列表完整性与 SKU 覆盖是两回事。SKU 细节覆盖：未知。上下架默认禁用；启用后仍需核验、确认与审计。其他商品写入未授权。</footer>
 </main>

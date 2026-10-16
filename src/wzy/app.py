@@ -18,6 +18,7 @@ from .collector import BrowserCollector
 from .domain import Result
 from .store import Store
 from .listings import ListingBrowser, ListingError
+from .scheduler import Coordinator, instance_lease
 
 
 class ListingInput(BaseModel):
@@ -45,6 +46,24 @@ class MatchInput(BaseModel):
     confirmed: bool = False
 
 
+class ScheduleInput(BaseModel):
+    model_config = {'extra': 'forbid', 'strict': True}
+    enabled: bool
+    interval_minutes: int = Field(default=60, ge=15, le=1440)
+    resume: bool = False
+
+
+class PauseInput(BaseModel):
+    model_config = {'extra': 'forbid', 'strict': True}
+    paused: bool
+
+
+class NotificationInput(BaseModel):
+    model_config = {'extra': 'forbid', 'strict': True}
+    read: bool
+    acknowledged: bool = False
+
+
 class RemoveInput(BaseModel):
     competitor_key: str = Field(max_length=256)
 
@@ -54,8 +73,8 @@ def safe_csv(value):
     return "'" + value if value.lstrip().startswith(('=', '+', '-', '@')) or value.startswith(('\t', '\r', '\n')) else value
 
 
-def create_app(db_path=None, *, collector=None, listing_browser=None):
-    store = Store(db_path or os.environ.get('WZY_DB', 'data/wzy.sqlite3'))
+def create_app(db_path=None, *, collector=None, listing_browser=None, clock=None):
+    store = Store(db_path or os.environ.get('WZY_DB', 'data/wzy.sqlite3'), clock=clock)
     collect = collector or BrowserCollector(os.environ.get('WZY_CDP_URL', 'http://127.0.0.1:9224'), os.environ.get('WZY_ACCOUNT_LOCK'))
     busy = asyncio.Lock()
     listing = listing_browser or ListingBrowser(os.environ.get('WZY_CDP_URL', 'http://127.0.0.1:9224'),
@@ -66,13 +85,24 @@ def create_app(db_path=None, *, collector=None, listing_browser=None):
     if allowed_items is not None and any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', x) for x in allowed_items):
         raise ValueError('invalid_listing_allowlist')
 
+    coordinator = Coordinator(store, collect, busy)
+
     @asynccontextmanager
     async def lifespan(app):
-        store.recover_interrupted()
-        yield
+        with instance_lease(store.path):
+            store.recover_interrupted()
+            store.rebase_schedules()
+            task = asyncio.create_task(coordinator.run())
+            try:
+                yield
+            finally:
+                task.cancel()
+                await coordinator.close()
+                await asyncio.gather(task, return_exceptions=True)
 
     app = FastAPI(title='WZY 只读工作台', lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
+    app.state.coordinator = coordinator
 
     @app.middleware('http')
     async def local_boundary(request: Request, call_next):
@@ -108,6 +138,34 @@ def create_app(db_path=None, *, collector=None, listing_browser=None):
     async def state():
         return dict(store.state(), listing_writes_enabled=writes_enabled, listing_allowed_items=allowed_items)
 
+    @app.get('/api/scheduler')
+    async def schedules():
+        return dict(store.schedules(), busy=busy.locked())
+
+    @app.put('/api/scheduler')
+    async def pause_schedule(body: PauseInput):
+        store.pause_scheduler(body.paused)
+        return store.schedules()
+
+    @app.put('/api/scheduler/sources/{store_id}')
+    async def configure_schedule(store_id: int, body: ScheduleInput):
+        if not any(s['id'] == store_id for s in store.shops()):
+            raise HTTPException(404, '采集来源不存在')
+        store.configure_schedule(store_id, **body.model_dump())
+        return store.schedules()
+
+    @app.get('/api/notifications')
+    async def notifications(before_run: int | None = None):
+        if before_run is not None and before_run < 1:
+            raise HTTPException(422, '通知游标不合法')
+        return store.inbox(before_run=before_run)
+
+    @app.patch('/api/notifications/{event_id}')
+    async def update_notification(event_id: str, body: NotificationInput):
+        if len(event_id) > 128 or not store.update_notification(event_id, **body.model_dump()):
+            raise HTTPException(404, '通知不存在')
+        return {'ok': True}
+
     @app.get('/api/runs')
     async def runs():
         return store.runs()
@@ -121,19 +179,10 @@ def create_app(db_path=None, *, collector=None, listing_browser=None):
         source = next((s for s in store.shops() if s['id'] == body.store_id), None)
         if not source:
             raise HTTPException(404, '采集来源不存在')
-        if busy.locked():
-            raise HTTPException(409, '已有采集任务，请等待完成')
-        async with busy:
-            run_id = store.start_run(source['id'])
-            try:
-                result = await collect(source)
-            except asyncio.CancelledError:
-                store.finish_run(run_id, Result(status='failed', errors=['interrupted']))
-                raise
-            except Exception:
-                result = Result(status='failed', errors=['collection_failed'])
-            store.finish_run(run_id, result)
-            return {'run_id': run_id, 'status': result.status, 'errors': result.errors}
+        try:
+            return await coordinator.collect(body.store_id)
+        except RuntimeError:
+            raise HTTPException(409, '已有账号任务，请等待完成') from None
 
     @app.get('/api/history')
     async def history(key: str):
@@ -166,7 +215,7 @@ def create_app(db_path=None, *, collector=None, listing_browser=None):
     async def listing_read(item_id: str):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', item_id):
             raise HTTPException(422, '商品 ID 不合法')
-        if busy.locked():
+        if busy.locked() or coordinator.closing:
             raise HTTPException(409, '账号任务执行中')
         async with busy:
             try:
@@ -186,7 +235,7 @@ def create_app(db_path=None, *, collector=None, listing_browser=None):
             if any(previous[k] != data[k] for k in ('item_id', 'desired', 'expected')):
                 raise HTTPException(409, '幂等键已用于其他请求')
             return previous
-        if busy.locked():
+        if busy.locked() or coordinator.closing:
             raise HTTPException(409, '账号任务执行中')
         async with busy:
             try:

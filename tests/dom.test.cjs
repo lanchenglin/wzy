@@ -99,6 +99,62 @@ test('listing UI shows enable/allowlist, requires confirmation and preserves ret
   d.window.close();
 });
 
+test('inbox older page is accessible and read action retains cursor',async()=>{
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/index.html','utf8'),{url:'http://127.0.0.1:8100',runScripts:'outside-only'});
+  const calls=[];
+  d.window.fetch=async(path,opts)=>{
+    calls.push(path);
+    return {ok:true,json:async()=>path==='/api/state'?{products:[],stores:[],comparisons:[],counts:{}}:path.startsWith('/api/notifications')?{unread:2,next_before_run:path.includes('?')?null:100,events:[{id:'run:1:changes',run_id:path.includes('?')?1:101,quality:'complete',kind:'changes',changes:[]}]}:[]};
+  };
+  d.window.eval(fs.readFileSync('src/wzy/static/app.js','utf8'));
+  await new Promise(r=>setImmediate(r));
+  const doc=d.window.document;
+  doc.getElementById('inbox-older').click();
+  await new Promise(r=>setImmediate(r));
+  assert.ok(calls.includes('/api/notifications?before_run=100'));
+  assert.ok(doc.getElementById('inbox').textContent.includes('#1 '));
+  doc.querySelector('#inbox button').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(calls.at(-1),'/api/notifications?before_run=100');
+  d.window.close();
+});
+
+test('suggestions prepare manual confirmation, schedules and inbox stay local', async()=>{
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/index.html','utf8'),{url:'http://127.0.0.1:8100',runScripts:'outside-only'});
+  const own={key:'own:a',title:'PPO',kind:'own',store_id:1,price:'10.00',matchable:true};
+  const comp={key:'shop:a',title:'<img src=x>',kind:'competitor',store_id:2,price:'8.00',matchable:true};
+  const state={products:[own,comp],stores:[],comparisons:[],counts:{},groups:[{own,competitors:[{product:comp,confirmed:false}],lowest_available:null}],suggestions:[{own_key:own.key,competitor_key:comp.key,confidence:'low',reasons:['family'],conflicts:[],unknown:['duration'],own_fields:{family:'ppo'},competitor_fields:{family:'ppo'}}]};
+  const calls=[];
+  d.window.fetch=async(path,opts)=>{
+    if(opts.method!=='GET') calls.push([path,JSON.parse(opts.body)]);
+    return {ok:true,json:async()=>path==='/api/state'?state:path==='/api/scheduler'?{paused:false,sources:[{store_id:2,enabled:false,interval_minutes:60,browser_evidence:'not_observed'}]}:path==='/api/notifications'?{unread:1,events:[{id:'run:1:changes',run_id:1,quality:'partial',kind:'changes',changes:[{title:'<img src=x>',type:'price_down',before:'10',after:'8'}]}]}:[]};
+  };
+  d.window.eval(fs.readFileSync('src/wzy/static/app.js','utf8'));
+  await new Promise(r=>setImmediate(r));
+  const doc=d.window.document;
+  assert.ok(doc.getElementById('suggestions').textContent.includes('期限'));
+  assert.equal(doc.querySelector('#comparison-groups img'),null);
+  doc.querySelector('#suggestions button').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(doc.getElementById('own-product').value,'own:a');
+  assert.equal(doc.getElementById('confirmed').checked,false);
+  assert.equal(calls.length,0);
+  doc.getElementById('scheduler-pause').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(calls[0],['/api/scheduler',{paused:true}]);
+  doc.querySelector('#schedule-2 input[type=checkbox]').checked=true;
+  doc.getElementById('schedule-2').dispatchEvent(new d.window.Event('submit',{cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(calls[1],['/api/scheduler/sources/2',{enabled:true,interval_minutes:60,resume:false}]);
+  assert.ok(doc.getElementById('inbox').textContent.includes('部分'));
+  assert.equal(doc.querySelector('#inbox img'),null);
+  doc.querySelector('#inbox button').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(calls[2][0],'/api/notifications/run%3A1%3Achanges');
+  assert.equal(calls[2][1].read,true);
+  d.window.close();
+});
+
 test('workbench renders untrusted names as text and posts confirmed local matching', async()=>{
   const html=fs.readFileSync('src/wzy/static/index.html','utf8');
   const d=new JSDOM(html,{url:'http://127.0.0.1:8100',runScripts:'outside-only'});

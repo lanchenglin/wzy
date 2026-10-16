@@ -1,5 +1,64 @@
 # 交接与验证记录
 
+## 第三阶段：建议、多店比较、只读调度与通知（2026-10-16）
+
+本轮按授权 brief 实现，不提交/推送，不停止/连接 8100 父服务，不访问真实 CDP、数据库、profile、Cookie、storage 或站点，不调用上下架。父服务现有 writes=true/无白名单状态未改动。真实 21 声明/19 卡片差异仍 unresolved partial，不补造商品。
+
+### 交付与操作入口
+
+- 本地确定性字段提取与建议：系列/型号/套餐/额度/期限/交付/质保，同项理由、冲突、未知可见。建议只能带入表单，仍须逐次人工确认；已有匹配保留。
+- 全商品多店比较：包括未匹配、自有确认组、多店价格/Decimal 差价与百分比、库存、观察时间、质量与 SKU 未知。最低可用仅人工确认且双方新鲜完整、竞品明确有货。2 小时时间窗口独立于完整性。
+- `latest_observation` 保留较新部分证据，主完整快照不被覆盖。通知基于实际连续观察，而非旧完整快照。
+- 默认关闭的持久调度：每来源 15–1440 分钟（默认 60）、全局暂停、来源登录挑战阻断/人工恢复、普通失败指数有界退避。一个 coordinator 负责手动/定时，和 listing 共用应用互斥/账号 flock；调度无写入口。实例锁先于 recover，第二新版服务拒绝同库启动。
+- 事务内持久站内通知：价格涨跌/明确库存转换，首次基线不报，部分证据警告，缺失不推断删除，failed/paused 仅状态转换诊断；持久去重、运行聚合、读/未读/确认。没有钉钉或任何外部推送。
+- API 与中文 UI 已接通。README/AGENTS/可携带 Skill 同步配置、协议与限制。
+
+### 本轮验证与限制
+
+新增测试先运行失败（缺 comparison/scheduler 模块、inbox 方法、scheduler API、新 DOM 控件），再实现。所有测试只用合成页面/采集器与临时数据库。最终本轮结果：**82 pytest passed、9 DOM tests passed**（原有 62 Python/7 DOM 全部保留）；JS 语法、Python compileall、pip check、git diff --check 全部通过。仍有一条 Starlette TestClient/httpx 上游弃用警告，未屏蔽；未添加依赖。没有真实浏览器验收或远端 CI。
+
+可复现命令：
+
+```bash
+.venv/bin/python -m pytest -q
+npm test
+node --check src/wzy/static/app.js
+.venv/bin/python -m compileall -q src/wzy
+.venv/bin/python -m pip check
+git diff --check
+```
+
+独立审查后的失败回归与修复：小数期限不再误提取整数后缀；型号不吞入中文属性；旧匹配表也警告时间陈旧；通知支持每页 100 条游标翻页管理历史未读；中断恢复同时更新诊断与调度结果；重复取消保留浏览器子任务所有权、清理有界，卡住时所有浏览器入口 fail-closed；重启保留失败退避。另以既有 matches/listing_operations 表和历史观察验证增量迁移保留审计/匹配且不回填假通知。
+
+Skill 检验：只读取旧 Skill 的基线无法找出启用/暂停/恢复、最低价资格、较新部分证据、inbox 或时钟测试命令；更新后独立检索可正确给出 API 载荷及证据限制。此检验没有执行真实命令。
+
+### 父会话验收步骤（本编码会话未执行）
+
+1. **先用合成时钟验证，不碰父库/CDP：**
+   ```bash
+   .venv/bin/python -m pytest tests/test_scheduler.py -q
+   .venv/bin/python -m pytest tests/test_comparison.py tests/test_notifications.py tests/test_api.py -q
+   npm test
+   ```
+   scheduler 测试注入 `Clock`，`advance(60)` 后调用真实 `Coordinator.tick()`，合成采集器返回 `Result`，临时库持久化；覆盖默认关闭、暂停、恢复、挑战、退避、并发、取消与实例锁。不是实际等待 60 分钟，不证明真实浏览器可用，无生产时钟快进接口。
+2. 父会话自己安排旧服务退出/迁移或使用**独立验收库**和空闲端口；不要让旧版与新版同时共享数据库（旧版没有新实例锁）。不要为了测试删除运行中的 lock 文件。同 DB 不用多 worker/硬链接别名。
+   ```bash
+   # 父会话自行选择实际验收库；本命令显式禁写，不沿用父服务写开关。
+   WZY_DB=/home/lan/.hermes/cache/scratch/wzy-stage3-acceptance.sqlite3 \
+   WZY_LISTING_WRITES_ENABLED=false \
+   .venv/bin/wzy --port 8101
+   ```
+3. GET `/api/scheduler` 确认所有来源 disabled、60 分钟、browser_evidence=not_observed。打开 UI 核对标签、键盘焦点、宽表滚动、无脚本注入；此轮没有真实截图。
+4. 独立授权后按旧协议手动只读采集，核对 PPO 全分类和 21/19 仍 partial。`POST /api/collect` 载荷 `{"store_id":2}`，带同源 Origin/X-WZY-Request。确认实际 run_id、时间、质量、last_attempt 和 browser_evidence；有数据不等于完整，last_success 仅完整结果更新。
+5. 查看建议冲突/未知，点击带入不得创建匹配；核对后人工保存。多店组包含所有确认店铺，未匹配仍可见。没有新鲜完整且明确有货证据时最低价应空，不能为演示强制 complete。
+6. 自然价格变化才验收真实通知，不为制造通知改平台价格。合成测试已覆盖首样本、部分变化、失败/暂停诊断、去重、重启和读/确认。GET `/api/notifications`；PATCH 返回的事件 id，载荷 `{"read":true,"acknowledged":true}`，重启验证持久。
+7. 若稳定，父会话显式按 README/Skill 启用来源 2 每 60 分钟。记录返回 next_run，**实际等待该时间及轮询间隔（最多约 5 秒，账号忙另计）**，再查运行和下次时间；不得把合成 clock 测试称为真实小时调度成功。开启前浏览器/账号由人类确认可用，期间不做其他不合作自动化。
+8. PUT `/api/scheduler` `{"paused":true}`，下一周期不自动执行，但手动仍可；已开始任务会完成。人工登录挑战后的来源必须 `resume:true`，手动成功不自动恢复。重启重新安排，绝不补跑风暴。验收结束是否保持定时开启由父会话明确决定。
+
+真实 UI/API 采集、60 分钟等待、浏览器任务页清理及真实旧库迁移仍由父会话验收。词典不是语义模型；未知字段必须人工补核。文件锁无法控制旧版、不合作进程或其他机器；浏览器证据仅是历史调用结果。通知只有本地 inbox，页面需刷新本地数据查看最新结果。
+
+---
+
 ## 第二阶段受控上下架（2026-10-16，当前交付）
 
 下文第一阶段禁写描述为历史记录，不再代表本次授权范围。本次只新增自有商品真实上下架，编辑/删除/购买/支付/读取卡密仍禁止。未提交、未推送；未停止或连接父会话 8100 服务，未访问真实 CDP、profile、Cookie、storage、真实数据库或站点。
