@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WZY 商品核对台</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
+<body>
+<header><div class="brand">WZY <span>商品核对台</span></div><span class="readonly">第一阶段 · 只读采集</span></header>
+<main>
+<section class="intro"><h1>先看全，再核对。</h1><p>汇集竞品与自有库存，保留价格证据。匹配由你确认，商品状态不会被修改。</p></section>
+<p id="notice" role="status" aria-live="polite">正在加载本地工作台…</p>
+<section aria-labelledby="sources-title"><div class="section-head"><h2 id="sources-title">采集来源</h2><button id="refresh" class="secondary">刷新本地数据</button></div><div id="sources"></div>
+<form id="shop-form"><label for="shop-url">添加竞品店铺</label><input id="shop-url" type="url" required placeholder="https://wzyp.cn/shop/店铺ID" maxlength="160"><button>添加店铺</button></form>
+<p class="hint">采集使用已人工登录的专用浏览器。遇到登录、验证或分页不明会停止；不会自动重试。</p></section>
+<section aria-labelledby="products-title"><div class="section-head"><h2 id="products-title">全部商品</h2><nav aria-label="数据导出"><a href="/api/export.json" download="wzy.json">导出 JSON</a><a href="/api/export.csv">导出 CSV</a></nav></div>
+<div class="filters"><label for="filter">查看</label><select id="filter"><option value="all">全部商品</option><option value="competitor">竞品商品</option><option value="own">自有库存</option><option value="pending">待匹配</option></select><label for="search">搜索</label><input id="search" type="search" placeholder="商品名称或分类"></div>
+<p id="summary" class="hint"></p><div class="table-scroll"><table><thead><tr><th>来源 / 分类</th><th>商品</th><th>展示价格</th><th>库存 / 上下架</th><th>证据状态</th><th>记录</th></tr></thead><tbody id="products"></tbody></table></div><p id="empty" class="empty" hidden>暂无商品。请先采集来源；无数据不代表库存为空。</p></section>
+<section aria-labelledby="match-title"><h2 id="match-title">人工匹配</h2><p class="hint">核对套餐、期限与交付方式后再确认。名称相似不代表同一 SKU；本版本不自动匹配。</p>
+<form id="match-form"><label for="own-product">自有商品</label><select id="own-product" required></select><label for="competitor-product">竞品商品</label><select id="competitor-product" required></select><label class="confirmation"><input id="confirmed" type="checkbox" required>我已核对两侧商品含义，确认匹配</label><button>保存匹配</button></form>
+<div class="table-scroll"><table><thead><tr><th>自有商品</th><th>竞品商品</th><th>自有价 − 竞品价</th><th>证据</th><th>操作</th></tr></thead><tbody id="matches"></tbody></table></div></section>
+<section aria-labelledby="runs-title"><h2 id="runs-title">最近采集记录</h2><div id="runs" class="run-list"></div></section>
+<footer>商品列表完整性与 SKU 覆盖是两回事。SKU 细节覆盖：未知。第二阶段商品写入：未授权、已禁用。</footer>
+</main>
+<dialog id="history-dialog"><div class="section-head"><h2 id="history-title">价格历史</h2><button id="close-history" class="secondary">关闭</button></div><div id="history-content"></div></dialog>
+</body></html>

@@ -1,0 +1,6 @@
+{
+  "name": "wzy-dom-tests",
+  "private": true,
+  "scripts": {"test": "node --test tests/dom.test.cjs"},
+  "devDependencies": {"jsdom": "^26.1.0"}
+}
