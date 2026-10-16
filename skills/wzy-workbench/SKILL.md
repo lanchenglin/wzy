@@ -1,6 +1,6 @@
 ---
 name: wzy-workbench
-description: Use when 在 Linux/WSL 使用 WZY 进行 wzyp.cn 多店竞品对比、匹配建议、定时只读采集、本地通知、自有库存采集、受控真实上下架、幂等审计、价格核验、人工匹配，或跨 AI 接手工作台时。
+description: Use when 在 Linux/WSL 使用 WZY 进行 wzyp.cn 多店竞品对比、匹配建议、定时只读采集、本地通知、自有库存采集、受控真实上下架、幂等审计、价格核验、人工匹配、工作台认证/HTTPS 公网部署，或跨 AI 接手工作台时。
 ---
 
 # WZY 工作台：只读采集与受控上下架
@@ -18,7 +18,7 @@ python3 -m venv .venv
 WZY_CDP_URL=http://127.0.0.1:9224 WZY_DB=data/wzy.sqlite3 .venv/bin/wzy --port 8100
 ```
 
-新机器获取命令：`git clone https://github.com/lanchenglin/wzy.git && cd wzy`。浏览器/CDP 必须由人类预先配置为 loopback；本 Skill 不提供自动启动/复制登录环境命令。Web 为 `http://127.0.0.1:8100`；端口冲突可改 `--port`。只监听本机，不设公网代理。不需要安装/启动 Playwright 浏览器。
+新机器获取命令：`git clone https://github.com/lanchenglin/wzy.git && cd wzy`。浏览器/CDP 必须由人类预先配置为 loopback；本 Skill 不提供自动启动/复制登录环境命令。Web 为 `http://127.0.0.1:8100`；端口冲突可改 `--port`。默认只监听本机、不设匿名公网代理；仅按下述认证协议可提供已授权 HTTPS 公网入口。不需要安装/启动 Playwright 浏览器。
 
 ## 本地覆盖与人工登录
 
@@ -117,6 +117,17 @@ npm test
 ```
 
 `tests/test_scheduler.py` 的 Clock.advance 驱动真实 coordinator + 临时 SQLite，采集器返回合成 Result。这是时间逻辑验证，不是 60 分钟真实采集成功证明；没有生产加速时钟 API。真实验收与等待真实 next_run 的步骤见 `docs/handoff.md`。
+
+## 可携带认证与公网协议
+
+1. 默认仍本机免登录。仅配置 `WZY_AUTH_FILE` 启用本机认证；另配 `WZY_PUBLIC_ORIGIN=https://wzy.blueforestfuture.com` 才允许该精确公网 Host。必须 HTTPS，无末尾斜杠/路径/通配符；无有效认证则拒绝启动。不要为迁移绕过校验。
+2. 人类在仓库根目录私下执行 `umask 077`、`install -d -m 700 "$HOME/.config/wzy"`，再执行 `.venv/bin/python -m wzy.auth set-password --file "$HOME/.config/wzy/auth.json" --username admin`。getpass 输入两次至少 12 字符独立密码；不把密码给 AI，不放命令参数/日志。文件 0600，盐化 PBKDF2 摘要与随机签名密钥，已有文件不覆盖。用户名可自选，无默认密码。
+3. `WZY_AUTH_FILE` 必须是当前用户私有普通文件的绝对路径，不允许符号链接/不安全权限。服务加载前验证，坏配置不降级。完整环境文件/systemd user 示例、密码轮换与精确代理要求见仓库 `docs/auth-deployment.md`；不要复制真实 JSON 到 Skill。轮换时用同一 helper 创建新路径（如 auth-next.json），私下更新环境文件的 WZY_AUTH_FILE，由父会话安排重启；旧会话全部失效，不盲目覆盖旧秘密。
+4. Web 仍 loopback，tunnel 仅转发 Web，不暴露 CDP。保持公网 Host 并在边缘强制 HTTPS；不信任 XFF/转发 Host/proto，CLI 禁用 uvicorn proxy headers。不要修改 Cloudflare 或现有 8100 服务，父会话安排部署与同库迁移。
+5. 认证覆盖所有业务、静态、导出、调度/上下架，包括 loopback；公开仅登录页/脚本/登录 API，docs/OpenAPI 关闭。8 小时 HttpOnly/SameSite Strict 会话，公网 Secure，退出/重启失效。无浏览器 storage/query token。中文页面登录/退出，401 清空并返回登录。
+6. 所有修改包括 login/logout 均须精确同源 Origin + `X-WZY-Request: 1`。旧 curl 示例仅在默认本机免登录直接可用；认证下必须先私下登录带 Cookie，不能改成匿名本机旁路。不要向 AI 展示 Cookie。
+7. 登录按真实 transport peer 5 次/60 秒，有界内存、无用户名持久锁定，不信任 XFF。tunnel 用户共享 peer 额度，存在共享入口暂时无法新登录的可用性限制；父会话应另外在边缘设置来源限流/访问控制，已有会话不受此额度影响。
+8. 认证不扩大商品写权限、不暂停已配置调度，退出不是撤销已派发任务。编码仅合成测试；独立 HTTPS/代理/systemd 真实验收交给父会话。新增验证 `.venv/bin/python -m pytest tests/test_auth.py -q`、`node --check src/wzy/static/login.js`，仍须完整 Python/DOM 套件。
 
 ## 禁止与常见误区
 

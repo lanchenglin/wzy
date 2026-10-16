@@ -11,7 +11,13 @@ python3 -m venv .venv
 .venv/bin/wzy --port 8100
 ```
 
-打开 <http://127.0.0.1:8100>。默认仅绑定 `127.0.0.1`，不要通过反向代理或公网监听暴露。端口被占用时会启动失败，可选择 `--port 8101`。不需要 `playwright install`：应用只连接已经运行的专用浏览器，不启动浏览器。
+打开 <http://127.0.0.1:8100>。默认仅绑定 `127.0.0.1`，未配置认证时不要通过反向代理或公网监听暴露。已授权的 HTTPS 公网入口须按下节启用认证，Web 仍只监听 loopback。端口被占用时会启动失败，可选择 `--port 8101`。不需要 `playwright install`：应用只连接已经运行的专用浏览器，不启动浏览器。
+
+### 可选认证与公网入口
+
+已支持精确 `WZY_PUBLIC_ORIGIN` + 私有 `WZY_AUTH_FILE`。公网只允许 HTTPS 且必须认证；启用后本机 API、静态资源、导出、调度和上下架接口同样受保护。默认仍为本机模式。中文登录/退出，8 小时会话，退出/重启撤销；无默认密码。
+
+**完整私下设置命令、systemd user/环境文件示例、代理契约、限流限制和轮换步骤见 [认证部署说明](docs/auth-deployment.md)。** 密码由人类 getpass 输入，不交给 AI；编码会话不改运行服务、Cloudflare 或真实秘密。
 
 ### 本机配置
 
@@ -102,7 +108,7 @@ curl --fail --silent -X PUT "$BASE/api/scheduler/sources/2" \
 
 主要接口：`GET /api/state`、`GET /api/runs`、`GET /api/history?key=...`、`POST /api/shops`、`POST /api/collect`、`POST/DELETE /api/matches`、`GET /api/export.json`、`GET /api/export.csv`。接口用于本地工作台，不是站点商家 API。
 
-本地修改请求须带与 Host 完全一致的 `Origin: http://127.0.0.1:8100` 以及 `X-WZY-Request: 1`；不开放 CORS。Host 限定 loopback。不能把此边界当成多用户认证；同机恶意进程不在防护范围。仅 `POST /api/listings/state` 在显式启用且逐次确认时可写；其余 `/api/listings/*` 修改请求返回 403。外部目标仅允许严格店铺 URL 与固定商家路径。
+本地修改请求须带与 Host 完全一致的 `Origin: http://127.0.0.1:8100` 以及 `X-WZY-Request: 1`；不开放 CORS。默认 Host 限定 loopback；有效认证下可额外允许精确 HTTPS 公网 origin。登录/退出也必须同源校验，业务接口在 loopback 上也不免认证。docs/OpenAPI 关闭。不能把此边界当成多用户认证；同机恶意进程不在防护范围。仅 `POST /api/listings/state` 在显式启用且逐次确认时可写；其余 `/api/listings/*` 修改请求返回 403。外部目标仅允许严格店铺 URL 与固定商家路径。
 
 ## 第二阶段：受控真实上下架
 

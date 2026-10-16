@@ -1,5 +1,36 @@
 # 交接与验证记录
 
+## 可选认证与精确 HTTPS 公网入口（2026-10-16）
+
+本轮实现工作台认证，不提交/推送，不读取真实秘密/数据库，不连接浏览器/CDP/8100 父服务，不修改 systemd、Cloudflare 或任何现有服务。用户名和密码由父会话/人类私下设置，代码没有默认密码。旧的本机-only 限制仅在有效认证 + 显式 HTTPS origin 条件下扩展；商品写入边界完全保留。
+
+### 交付
+
+- `src/wzy/auth.py`：启动前私有文件/权限/格式校验、PBKDF2 密码 helper、精确 Host 与同源校验、全业务认证中间件、8 小时 HMAC 签名且服务端可撤销会话、按 transport peer 有界登录限流。
+- `app.py` 在打开数据库前加载认证；关闭 OpenAPI/docs；CLI 禁止代理头改写 peer。默认本机行为保留，启用认证后 loopback 不旁路。
+- 中文登录/退出，登录脚本独立公开、业务静态资源受保护；401 清空业务界面。Cookie HttpOnly/Strict，公网 Secure，无 query/storage token。
+- [认证部署说明](auth-deployment.md) 给出 getpass 私下创建、EnvironmentFile/user-systemd 示例、代理 Host/TLS 契约、轮换与父会话验收；README/AGENTS/portable Skill 同步。
+
+### 测试与待验收
+
+第一批 30 项认证回归在旧实现全部失败，再实现通过；登录 DOM 在缺少页面时失败，再实现通过。新增会话过期 UI 回归复现移除 notice 后错误处理崩溃，修复后通过。后续扩展 helper 子进程、真实临时配置权限、重启失效、合法登录后的业务接口及保留禁写边界、限流窗口恢复/已登录不受影响和重复安全头测试。
+
+测试使用随机合成密码/签名密钥、临时 SQLite、TestClient 和 jsdom；未接触真实凭据/浏览器。原有 82 Python 与 9 DOM 测试保留。最终 **127 Python passed、12 DOM passed**；JS 语法、compileall、pip check、git diff --check 全部通过。保留一条 Starlette TestClient/httpx 上游弃用警告，无新增依赖。独立审查发现慢请求体可超过哈希并发限制、历史弹窗未随 401 清空两项，均先复现失败再修复；复审未发现其他高置信缺陷。新增 10 秒请求体 deadline/容量恢复、非法 Unicode 和成功退出 DOM 回归通过。Skill 基线缺认证步骤；更新后独立检索可找出私下配置、本机不可旁路、代理信任、共享 tunnel 限流与轮换。未做真实部署验收。命令：
+
+```bash
+.venv/bin/python -m pytest -q
+npm test
+node --check src/wzy/static/app.js
+node --check src/wzy/static/login.js
+.venv/bin/python -m compileall -q src/wzy
+.venv/bin/python -m pip check
+git diff --check
+```
+
+部署限制：tunnel 用户共享同一个 transport peer 的 5 次/分钟登录额度，应用不信任 XFF；代理入口攻击可能暂时阻止新登录（不影响已有会话），应由父会话设置边缘来源限流/访问控制。不宣称解决分布式攻击。TLS 与 HTTP 拒绝由边缘保证；应用不会相信 forwarded proto。8 小时会话/限流仅单进程内存，重启全部会话失效，不用多 worker。认证不暂停持久调度，不撤销已派发操作。真实 HTTPS、代理 Host 保留、Cookie 浏览器行为、systemd/Cloudflare 均待父会话独立验收，不能据合成测试称为已上线。
+
+---
+
 ## 第三阶段：建议、多店比较、只读调度与通知（2026-10-16）
 
 本轮按授权 brief 实现，不提交/推送，不停止/连接 8100 父服务，不访问真实 CDP、数据库、profile、Cookie、storage 或站点，不调用上下架。父服务现有 writes=true/无白名单状态未改动。真实 21 声明/19 卡片差异仍 unresolved partial，不补造商品。

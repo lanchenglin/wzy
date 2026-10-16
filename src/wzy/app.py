@@ -5,7 +5,6 @@ import csv
 import io
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Literal
 import re
 
@@ -14,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .auth import Auth
 from .collector import BrowserCollector
 from .domain import Result
 from .store import Store
@@ -74,6 +74,7 @@ def safe_csv(value):
 
 
 def create_app(db_path=None, *, collector=None, listing_browser=None, clock=None):
+    auth = Auth()
     store = Store(db_path or os.environ.get('WZY_DB', 'data/wzy.sqlite3'), clock=clock)
     collect = collector or BrowserCollector(os.environ.get('WZY_CDP_URL', 'http://127.0.0.1:9224'), os.environ.get('WZY_ACCOUNT_LOCK'))
     busy = asyncio.Lock()
@@ -100,31 +101,12 @@ def create_app(db_path=None, *, collector=None, listing_browser=None, clock=None
                 await coordinator.close()
                 await asyncio.gather(task, return_exceptions=True)
 
-    app = FastAPI(title='WZY 只读工作台', lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title='WZY 只读工作台', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
     app.state.coordinator = coordinator
 
-    @app.middleware('http')
-    async def local_boundary(request: Request, call_next):
-        host = request.headers.get('host', '')
-        try:
-            parsed = urlsplit('http://' + host)
-            valid = parsed.hostname in {'127.0.0.1', 'localhost', '::1'} and not parsed.username and not parsed.password and not parsed.path and not parsed.query and not parsed.fragment
-            _ = parsed.port
-        except ValueError:
-            valid = False
-        if not valid:
-            return JSONResponse({'detail': '仅允许本机访问'}, status_code=400)
-        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
-            origin = request.headers.get('origin')
-            if origin != f'http://{host}' or request.headers.get('x-wzy-request') != '1' or request.headers.get('sec-fetch-site') == 'cross-site':
-                return JSONResponse({'detail': '本地同源校验失败'}, status_code=403)
-        response = await call_next(request)
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Referrer-Policy'] = 'no-referrer'
-        response.headers['Cache-Control'] = 'no-store'
-        return response
+    app.middleware('http')(auth.boundary)
+    auth.register(app, STATIC)
 
     @app.exception_handler(ValueError)
     async def validation_error(request, exc):
@@ -136,7 +118,7 @@ def create_app(db_path=None, *, collector=None, listing_browser=None, clock=None
 
     @app.get('/api/state')
     async def state():
-        return dict(store.state(), listing_writes_enabled=writes_enabled, listing_allowed_items=allowed_items)
+        return dict(store.state(), auth_enabled=bool(auth.config), listing_writes_enabled=writes_enabled, listing_allowed_items=allowed_items)
 
     @app.get('/api/scheduler')
     async def schedules():
@@ -289,4 +271,4 @@ def main():
     parser.add_argument('--port', type=int, default=8100)
     args = parser.parse_args()
     import uvicorn
-    uvicorn.run(create_app(), host='127.0.0.1', port=args.port, access_log=False)
+    uvicorn.run(create_app(), host='127.0.0.1', port=args.port, access_log=False, proxy_headers=False)

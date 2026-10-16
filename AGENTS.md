@@ -22,6 +22,13 @@
 - 新版同库服务先取得实例 flock 再恢复；旧版父服务不支持此锁，禁止借此并行使用父库。不要删除运行中的锁文件或用数据库硬链接别名。编码会话不改父服务启用状态/白名单。
 - 通知只比较实际连续观察，首次基线不报警；partial 变化标警告，失败/暂停只按状态转换诊断，缺失不等于删除。无钉钉或其他外部推送，不访问无关设置/token。UI 产品内容只用 textContent。
 
+## 认证与公网边界
+
+- 已授权可选 HTTPS 公网入口，唯一例外是有效 `WZY_AUTH_FILE` 配合精确 `WZY_PUBLIC_ORIGIN`；默认仍本机，不允许匿名公网。认证启用时所有业务/API/静态/导出包括 loopback 都需要会话，调度和上下架授权不因此扩大。
+- 不读取或接收真实密码/认证 JSON/会话；helper 由人类 getpass 私下创建，0600、无默认密码、错误配置 fail-closed。编码只用随机合成凭据与临时库，不改父服务、Cloudflare、其他项目配置，不 commit/push。
+- 代理必须保持精确公网 Host 并终止 HTTPS；CLI 禁用代理头信任，不信任 XFF/X-forwarded host/proto；不得暴露 CDP。所有修改（含 login/logout）继续严格 Origin/X-WZY-Request 校验。
+- 便携部署命令、环境文件/systemd 示例与限流/会话限制见 `docs/auth-deployment.md`。父会话独立审查部署；既有 curl 示例在认证下也须会话，不提供本机绕过。
+
 ## 开发地图
 
 - `src/wzy/domain.py`：数据结构、URL、Decimal。
@@ -32,7 +39,8 @@
 - `src/wzy/comparison.py`：透明字段提取、建议、时间证据与多店分组/Decimal 最低价。
 - `src/wzy/notifications.py`：事务内按运行聚合观察变化、诊断去重。
 - `src/wzy/scheduler.py`：持久调度设置、同库实例锁、手动/自动共享 coordinator。
-- `src/wzy/app.py`：本地 FastAPI 边界与接口、lifespan；`static/`：中文界面。
+- `src/wzy/auth.py`：私有认证配置、密码 helper、Host/CSRF、会话与登录限流。
+- `src/wzy/app.py`：FastAPI 边界与接口、lifespan；`static/`：中文界面。
 - `tests/`：合成页面与临时数据库测试；不使用真实浏览器。
 
 运行 `.venv/bin/python -m pytest -q`，修改 JS 后运行 `node --check src/wzy/static/app.js`。先加失败回归测试再修复。未知 DOM 应降级，不可为通过验收硬编码商品数量 21 或凭空编造商品 ID。列表完整性和 SKU 覆盖独立报告。产品字段不可信，渲染只用 textContent；日志/API 不返回原始浏览器异常或完整异常 URL。

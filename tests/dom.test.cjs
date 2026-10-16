@@ -1,7 +1,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
-const {JSDOM} = require('jsdom');
+const {JSDOM, VirtualConsole} = require('jsdom');
 const fs = require('node:fs');
 const scripts = JSON.parse(execFileSync(process.env.WZY_TEST_PYTHON || '.venv/bin/python', ['-c', 'import json; from wzy.collector import EXTRACT,NEXT_STATE,NEXT_CLICK; print(json.dumps([EXTRACT,NEXT_STATE,NEXT_CLICK]))'], {encoding:'utf8'}));
 const listingScripts = JSON.parse(execFileSync(process.env.WZY_TEST_PYTHON || '.venv/bin/python', ['-c', 'import json; from wzy.listings import PROBE,CLICK; print(json.dumps([PROBE,CLICK]))'], {encoding:'utf8'}));
@@ -182,4 +182,65 @@ test('workbench renders untrusted names as text and posts confirmed local matchi
   assert.deepEqual(posts[0].slice(0,2),['/api/matches',{own_key:'own:a',competitor_key:'shop:a',confirmed:true}]);
   assert.equal(posts[0][2]['X-WZY-Request'],'1');
   d.window.close();
+});
+
+
+test('login sends same-origin JSON, clears password and renders generic errors safely',async()=>{
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/login.html','utf8'),{url:'https://wzy.example.invalid/login',runScripts:'outside-only'});
+  let request;
+  d.window.fetch=async(path,opts)=>{request={path,opts};return {ok:false,status:401,json:async()=>({detail:'<img src=x onerror=alert(1)>'})};};
+  d.window.eval(fs.readFileSync('src/wzy/static/login.js','utf8'));
+  const doc=d.window.document;
+  doc.getElementById('username').value='synthetic';
+  doc.getElementById('password').value='synthetic-only-test';
+  doc.getElementById('login-form').dispatchEvent(new d.window.Event('submit',{cancelable:true}));
+  await new Promise(r=>setTimeout(r,10));
+  assert.equal(request.path,'/api/auth/login');
+  assert.equal(request.opts.headers['X-WZY-Request'],'1');
+  assert.equal(request.opts.credentials,'same-origin');
+  assert.equal(JSON.parse(request.opts.body).password,'synthetic-only-test');
+  assert.equal(doc.getElementById('password').value,'');
+  assert.equal(doc.querySelectorAll('img').length,0);
+  assert.match(doc.getElementById('login-notice').textContent,/登录失败/);
+  assert.equal(d.window.localStorage.length,0);
+  assert.equal(doc.getElementById('login-submit').disabled,false);
+});
+
+
+test('expired workbench clears business data without losing status error handling',async()=>{
+  const virtualConsole=new VirtualConsole();
+  virtualConsole.on('jsdomError', error=>{if(!error.message.startsWith('Not implemented: navigation'))throw error;});
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/index.html','utf8'),{url:'https://wzy.example.invalid/',runScripts:'outside-only',virtualConsole});
+  const dialog=d.window.document.getElementById('history-dialog');
+  dialog.setAttribute('open','');
+  d.window.document.getElementById('history-content').textContent='SYNTHETIC PRIVATE HISTORY';
+  d.window.fetch=async()=>({ok:false,status:401,json:async()=>({detail:'请先登录'})});
+  d.window.eval(fs.readFileSync('src/wzy/static/app.js','utf8'));
+  await new Promise(r=>setTimeout(r,20));
+  assert.equal(d.window.document.getElementById('products'),null);
+  assert.ok(d.window.document.getElementById('notice'));
+  assert.equal(d.window.document.body.textContent.includes('SYNTHETIC PRIVATE HISTORY'),false);
+  assert.equal(d.window.document.querySelector('dialog[open]'),null);
+});
+
+
+test('successful logout posts CSRF header and clears business history',async()=>{
+  const virtualConsole=new VirtualConsole();
+  virtualConsole.on('jsdomError', error=>{if(!error.message.startsWith('Not implemented: navigation'))throw error;});
+  const d=new JSDOM(fs.readFileSync('src/wzy/static/index.html','utf8'),{url:'https://wzy.example.invalid/',runScripts:'outside-only',virtualConsole});
+  let sent;
+  d.window.fetch=(path,opts)=>{
+    if(path==='/api/auth/logout'){sent=opts;return Promise.resolve({ok:true,status:200,json:async()=>({ok:true})});}
+    return new Promise(()=>{});
+  };
+  d.window.eval(fs.readFileSync('src/wzy/static/app.js','utf8'));
+  d.window.document.getElementById('history-content').textContent='PRIVATE LOGOUT HISTORY';
+  d.window.document.getElementById('history-dialog').setAttribute('open','');
+  d.window.document.getElementById('logout').click();
+  await new Promise(r=>setTimeout(r,10));
+  assert.equal(sent.method,'POST');
+  assert.equal(sent.headers['X-WZY-Request'],'1');
+  assert.equal(d.window.document.body.textContent.includes('PRIVATE LOGOUT HISTORY'),false);
+  assert.equal(d.window.document.getElementById('products'),null);
+  assert.match(d.window.document.getElementById('notice').textContent,/已退出/);
 });

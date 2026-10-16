@@ -10,9 +10,21 @@ function el(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
+function clearBusinessView() {
+  document.querySelector('main').replaceChildren($('notice'));
+  const dialog = $('history-dialog');
+  if (dialog) { dialog.removeAttribute('open'); dialog.replaceChildren(); }
+  state = {products:[], stores:[], comparisons:[]};
+}
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'error':''; }
 async function api(path, method='GET', body) {
   const response = await fetch(path, {method, headers:{'Content-Type':'application/json','X-WZY-Request':'1'}, ...(body?{body:JSON.stringify(body)}:{})});
+  if (response.status === 401) {
+    clearBusinessView();
+    notice('会话已过期，请重新登录。', true);
+    window.location.replace('/login');
+    throw new Error('请重新登录');
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '输入不合法，请核对填写内容');
   return data;
@@ -26,6 +38,7 @@ function action(label, handler, secondary=false) {
 function time(value) { return value ? new Date(value).toLocaleString('zh-CN') : '暂无'; }
 async function refresh() {
   state = await api('/api/state');
+  $('logout').hidden = !state.auth_enabled;
   renderSources(); renderProducts(); renderMatches(); renderListingPolicy(); renderGroups(); renderSuggestions();
   await refreshOperations();
   await refreshSchedules();
@@ -210,3 +223,12 @@ $('refresh').addEventListener('click',()=>refresh().then(()=>notice('已刷新�
 $('filter').addEventListener('change',renderProducts);$('search').addEventListener('input',renderProducts);
 $('close-history').addEventListener('click',()=>$('history-dialog').close());
 refresh().then(()=>notice('本地工作台已就绪。定时采集仅运行显式启用的来源；刷新本地数据查看最新通知。')).catch(e=>notice(e.message,true));
+
+$('logout').addEventListener('click', async () => {
+  try {
+    await api('/api/auth/logout', 'POST');
+    clearBusinessView();
+    notice('已退出登录。');
+    window.location.replace('/login');
+  } catch (e) { notice(e.message, true); }
+});
